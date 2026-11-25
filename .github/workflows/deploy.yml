@@ -93,7 +93,17 @@ jobs:
           print("Authentication patches applied.")
           PY
           node --check website/dist/members.js
-
+      - name: Enable instant community publishing
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("website/dist/members.js")
+          s = p.read_text()
+          s = s.replace("Submit for review", "Publish Post")
+          s = s.replace("Submitted for moderation", "Successfully published")
+          s = s.replace("approved reviews", "published reviews")
+          p.write_text(s)
+          PY
       - name: Connect Supabase
         working-directory: website
         env:
