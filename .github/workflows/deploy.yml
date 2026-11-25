@@ -849,6 +849,45 @@ jobs:
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
         run: node scripts/configure.mjs
+      - name: Fix community image permissions
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import os
+          from urllib.parse import urlsplit
+
+          url = urlsplit(os.environ["SUPABASE_URL"])
+          origin = url.scheme + "://" + url.netloc
+
+          for p in Path("website/dist").rglob("*.html"):
+              s = p.read_text()
+
+              def fix(match):
+                  directive = match.group(0)
+                  directive = directive.replace("'none'", "")
+                  if origin not in directive:
+                      directive += " " + origin
+                  return directive
+
+              s = re.sub(
+                  r"\bimg-src\s+[^;\"<>]*",
+                  fix,
+                  s
+              )
+
+              s = s.replace(
+                  "members.js?v=community7",
+                  "members.js?v=community8"
+              )
+
+              p.write_text(s)
+
+          print("Community image permissions updated.")
+          PY
+
 
       - uses: actions/configure-pages@v5
 
