@@ -441,7 +441,7 @@ jobs:
           target="if(cmd==='discussion')publish('discussion');"
           assert target in s
           s=s.replace(target,target+
-            "\nif(cmd==='photo-post')publishPhotos();",1)
+            "\nif(cmd==='photo-post')await publishPhotos();",1)
 
           target="let data=await rpc('feed',{page_no:feedPage});"
           assert target in s
@@ -499,7 +499,7 @@ jobs:
           h=Path("website/dist/index.html")
           h.write_text(h.read_text().replace(
               "members.js?v=community4",
-              "members.js?v=community5"
+              "members.js?v=community6"
           ))
           PY
           node --check website/dist/members.js
