@@ -26,14 +26,13 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("website/dist/members.js")
           s = p.read_text()
 
-          def patch(old, new):
+          def patch(old,new):
               global s
-              assert old in s, "Patch target missing: " + old
-              s = s.replace(old, new, 1)
+              assert old in s, "Missing target: "+old
+              s=s.replace(old,new,1)
 
           patch(
               "function setSession(t){token=t;token.expires_at=t.expires_at||Date.now()/1000+t.expires_in}",
@@ -77,48 +76,319 @@ jobs:
               "settings=await rpc('state');if(token&&settings.active)await load();updateAccountButton();route();"
           )
 
-          patch(
+          s=s.replace(
               "Your session is held in memory.",
               "Your session is remembered on this browser."
           )
 
+          s=s.replace("Submit for review","Publish Post")
+          s=s.replace("Submitted for moderation","Successfully published")
+          s=s.replace("approved reviews","published reviews")
+
           p.write_text(s)
-
-          h = Path("website/dist/index.html")
-          h.write_text(h.read_text().replace(
-              'src="members.js"',
-              'src="members.js?v=3"'
-          ))
-
-          print("Authentication patches applied.")
           PY
-          node --check website/dist/members.js
-      - name: Enable instant community publishing
+
+      - name: Upgrade community and repair photo uploads
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("website/dist/members.js")
-          s = p.read_text()
-          s = s.replace("Submit for review", "Publish Post")
-          s = s.replace("Submitted for moderation", "Successfully published")
-          s = s.replace("approved reviews", "published reviews")
-          p.write_text(s)
-          PY
-      - name: Upgrade community social feed
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("website/dist/members.js")
-          s = p.read_text()
+          import os,json,re
 
-          start = s.index("async function community(")
-          end = s.index("async function admin(", start)
-          original = s[start:end].replace(
+          p=Path("website/dist/members.js")
+          s=p.read_text()
+
+          start=s.index("async function community(")
+          end=s.index("async function admin(",start)
+
+          original=s[start:end].replace(
               "async function community(",
-              "async function legacyCommunity(", 1)
+              "async function legacyCommunity(",1
+          )
 
-          replacement = r"""
+          replacement=r"""
+          const vxUrl=__VX_URL__;
+          const vxKey=__VX_KEY__;
           let socialTab='all';
+
+          async function compressPhoto(file){
+            const url=URL.createObjectURL(file);
+            try{
+              const img=new Image();
+              img.src=url;
+              await img.decode();
+
+              const canvas=document.createElement('canvas');
+              const scale=Math.min(1,1600/Math.max(img.width,img.height));
+
+              canvas.width=Math.max(1,Math.round(img.width*scale));
+              canvas.height=Math.max(1,Math.round(img.height*scale));
+
+              const ctx=canvas.getContext('2d');
+              ctx.fillStyle='#ffffff';
+              ctx.fillRect(0,0,canvas.width,canvas.height);
+              ctx.drawImage(img,0,0,canvas.width,canvas.height);
+
+              for(let q=.85;q>=.15;q-=.1){
+                const blob=await new Promise(resolve=>
+                  canvas.toBlob(resolve,'image/jpeg',q));
+
+                if(blob&&blob.size<=512000)return blob;
+              }
+
+              throw Error('Photo is too large.');
+            }finally{
+              URL.revokeObjectURL(url);
+            }
+          }
+
+          async function vxRequest(path,options={}){
+            const response=await fetch(vxUrl+path,{
+              ...options,
+              headers:{
+                apikey:vxKey,
+                Authorization:'Bearer '+(token?.access_token||vxKey),
+                ...(options.headers||{})
+              }
+            });
+
+            const raw=await response.text();
+            let result;
+            try{result=JSON.parse(raw)}
+            catch{result=raw}
+
+            if(!response.ok){
+              throw Error(
+                result?.message||
+                result?.error_description||
+                result?.error||
+                raw||
+                'Request failed'
+              );
+            }
+
+            return result;
+          }
+
+          async function publishPhotos(hash,area){
+            if(!token){
+              alert('Please sign in before uploading photos.');
+              return;
+            }
+
+            if(!ready()){
+              alert('Please complete your traveller account setup.');
+              return;
+            }
+
+            document.getElementById('vx-photo-dialog')?.remove();
+
+            const dialog=document.createElement('dialog');
+            dialog.id='vx-photo-dialog';
+            dialog.className='vx-dialog';
+
+            dialog.innerHTML=`
+              <form id="vx-photo-form">
+                <div class="vx-dialog-header">
+                  <h2>New photo post</h2>
+                  <button type="button" id="vx-close">×</button>
+                </div>
+
+                <label>Title
+                  <input name="title" required maxlength="150"
+                    placeholder="Give your voyage a title">
+                </label>
+
+                <label>Caption
+                  <textarea name="story" required minlength="10"
+                    placeholder="Tell us about your journey"></textarea>
+                </label>
+
+                <label>Travel photographs
+                  <input id="vx-files" type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    multiple required>
+                </label>
+
+                <small>Up to four photographs. Images are compressed automatically.</small>
+
+                <div id="vx-preview" class="vx-preview"></div>
+
+                <label class="vx-rights">
+                  <input type="checkbox" name="rights" required>
+                  I own these photographs or have permission to publish them publicly.
+                </label>
+
+                <p id="vx-status" role="status"></p>
+
+                <button class="vx-publish" type="submit">
+                  Publish photos
+                </button>
+              </form>
+            `;
+
+            document.body.appendChild(dialog);
+
+            const uploadForm=dialog.querySelector('form');
+            const input=dialog.querySelector('#vx-files');
+            const preview=dialog.querySelector('#vx-preview');
+            const status=dialog.querySelector('#vx-status');
+            const submit=uploadForm.querySelector('[type="submit"]');
+            const close=dialog.querySelector('#vx-close');
+
+            let previewUrls=[];
+            let busy=false;
+
+            function cleanup(){
+              previewUrls.forEach(url=>URL.revokeObjectURL(url));
+              previewUrls=[];
+            }
+
+            close.onclick=()=>{
+              if(!busy)dialog.close();
+            };
+
+            dialog.addEventListener('cancel',e=>{
+              if(busy)e.preventDefault();
+            });
+
+            dialog.addEventListener('close',()=>{
+              cleanup();
+              dialog.remove();
+            });
+
+            input.onchange=()=>{
+              cleanup();
+              preview.innerHTML='';
+              status.textContent='';
+
+              const files=[...input.files];
+
+              if(files.length>4){
+                input.value='';
+                status.textContent='Maximum four photos.';
+                return;
+              }
+
+              for(const file of files){
+                const url=URL.createObjectURL(file);
+                previewUrls.push(url);
+                const img=document.createElement('img');
+                img.src=url;
+                img.alt='Photo preview';
+                preview.appendChild(img);
+              }
+            };
+
+            uploadForm.onsubmit=async e=>{
+              e.preventDefault();
+
+              if(busy)return;
+
+              const files=[...input.files];
+              const title=uploadForm.elements.title.value.trim();
+              const story=uploadForm.elements.story.value.trim();
+              const rights=uploadForm.elements.rights.checked;
+
+              if(files.length<1||files.length>4){
+                status.textContent='Select one to four photos.';
+                return;
+              }
+
+              if(!title||story.length<10||!rights){
+                status.textContent='Complete the title, caption and agreement.';
+                return;
+              }
+
+              busy=true;
+              submit.disabled=true;
+              close.disabled=true;
+
+              const paths=[];
+              let published=false;
+              let publishing=false;
+
+              try{
+                status.textContent='Checking account...';
+
+                const user=await vxRequest('/auth/v1/user');
+
+                for(let i=0;i<files.length;i++){
+                  status.textContent=
+                    'Uploading photo '+(i+1)+' of '+files.length+'...';
+
+                  const blob=await compressPhoto(files[i]);
+
+                  const path=user.id+'/'+crypto.randomUUID()+'.jpg';
+
+                  await vxRequest(
+                    '/storage/v1/object/voyage-photos/'+path,{
+                      method:'POST',
+                      headers:{
+                        'Content-Type':'image/jpeg'
+                      },
+                      body:blob
+                    }
+                  );
+
+                  paths.push(path);
+                }
+
+                status.textContent='Publishing your voyage...';
+
+                publishing=true;
+
+                await vxRequest('/rest/v1/rpc/v26_publish_photo',{
+                  method:'POST',
+                  headers:{
+                    'Content-Type':'application/json'
+                  },
+                  body:JSON.stringify({
+                    heading:title,
+                    content:story,
+                    photo_paths:paths,
+                    rights:true
+                  })
+                });
+
+                published=true;
+                busy=false;
+                dialog.close();
+
+                socialTab='all';
+                feedPage=0;
+
+                await community(hash,area);
+
+              }catch(err){
+                if(!published&&!publishing&&paths.length){
+                  try{
+                    await vxRequest('/storage/v1/object/voyage-photos',{
+                      method:'DELETE',
+                      headers:{
+                        'Content-Type':'application/json'
+                      },
+                      body:JSON.stringify({prefixes:paths})
+                    });
+                  }catch{}
+                }
+
+                if(published){
+                  alert('Post published. Please refresh the feed.');
+                }else{
+                  status.textContent=String(err.message||err);
+                }
+              }finally{
+                busy=false;
+                submit.disabled=false;
+                close.disabled=false;
+              }
+            };
+
+            dialog.showModal();
+          }
 
           async function community(hash,area){
             if(hash==='rankings'||!configured||!settings.community)
@@ -126,6 +396,16 @@ jobs:
 
             let data=await rpc('feed',{page_no:feedPage});
             let state={links:[],saved:[]};
+            let photoMap=new Map();
+
+            try{
+              const photos=await rpc('feed_photos',{
+                page_no:feedPage
+              });
+              photoMap=new Map(photos.map(x=>[x.id,x.photos]));
+            }catch(err){
+              console.warn('Photo feed unavailable',err);
+            }
 
             if(token&&settings.active)
               state=await rpc('social');
@@ -133,59 +413,96 @@ jobs:
             if(socialTab==='following'){
               const following=new Set(
                 state.links.filter(x=>x.kind==='follow')
-                .map(x=>x.handle));
+                .map(x=>x.handle)
+              );
+
               data=data.filter(x=>following.has(x.username));
             }
 
             area.innerHTML=`
               <div class="vx-feed">
+
                 <div class="vx-tabs">
                   <button data-do="all">For You</button>
                   <button data-do="following">Following</button>
                   <button data-do="people">Discover</button>
                 </div>
+
                 <div class="vx-compose">
                   <strong>Share your voyage</strong>
                   <p>Where has your journey taken you?</p>
+
                   ${button('Create post','discussion')}
+                  ${button('Add photos','photo-post')}
                   ${button('Activity','activity')}
                 </div>
+
                 ${data.map(r=>{
                   const liked=state.saved.some(
-                    x=>x.id===r.id&&x.kind==='like');
+                    x=>x.id===r.id&&x.kind==='like'
+                  );
+
                   const saved=state.saved.some(
-                    x=>x.id===r.id&&x.kind==='save');
+                    x=>x.id===r.id&&x.kind==='save'
+                  );
+
                   return `
                     <article class="vx-post">
+
                       <div class="vx-author">
                         <div class="vx-avatar">
                           ${html(r.username.slice(0,2).toUpperCase())}
                         </div>
+
                         <div>
                           <strong>${html(r.username)}</strong>
                           <small>@${html(r.username)} ·
                             ${html(new Date(r.created_at).toLocaleDateString())}
                           </small>
                         </div>
+
                         ${button('Profile','author:'+r.username)}
                       </div>
+
                       <h3>${html(r.title)}</h3>
-                      ${r.destination?`<small>📍 ${html(r.destination)}</small>`:''}
+
+                      ${r.destination?
+                        `<small>Location: ${html(r.destination)}</small>`:''}
+
                       <p class="vx-story">${html(r.body)}</p>
+
+                      <div class="vx-photos">
+                        ${(photoMap.get(r.id)||[]).map(path=>{
+                          const src=vxUrl+
+                            '/storage/v1/object/public/voyage-photos/'+
+                            path.split('/').map(encodeURIComponent).join('/');
+
+                          return `<a href="${html(src)}"
+                            target="_blank" rel="noopener">
+                            <img src="${html(src)}"
+                              loading="lazy" alt="Travel photograph">
+                          </a>`;
+                        }).join('')}
+                      </div>
+
                       <div class="vx-actions">
                         ${button(liked?'♥ Liked':'♡ Like','like:'+r.id)}
-                        ${button('☏ Comment','comments:'+r.id)}
+                        ${button('Comment','comments:'+r.id)}
                         ${button(saved?'Saved':'Bookmark','save:'+r.id)}
                         ${button('Share','share:'+r.id)}
                         ${button('Report','report:'+r.id)}
                       </div>
+
                     </article>`;
                 }).join('')}
+
                 ${data.length?'':'<p>No posts in this feed yet.</p>'}
+
                 <div class="vx-actions">
                   ${feedPage?button('Previous','prev'):''}
                   ${button('Next','next')}
                 </div>
+
               </div>`;
 
             area.querySelector(
@@ -195,8 +512,10 @@ jobs:
             area.onclick=async e=>{
               const b=e.target.closest('[data-do]');
               if(!b)return;
+
               const cmd=b.dataset.do;
               const [op,id]=cmd.split(':');
+
               try{
                 if(cmd==='all'||cmd==='following'){
                   if(cmd==='following'&&!ready())return;
@@ -204,73 +523,111 @@ jobs:
                   feedPage=0;
                   await community(hash,area);
                 }
-                if(cmd==='people')social.people();
+
+                if(cmd==='people')await social.people();
+
                 if(cmd==='activity'&&ready())
                   await social.activity();
-                if(cmd==='discussion')publish('discussion');
-                if(op==='author')await social.profile(id);
-                if(op==='comments')await social.comments(id);
+
+                if(cmd==='discussion')
+                  await publish('discussion');
+
+                if(cmd==='photo-post')
+                  await publishPhotos(hash,area);
+
+                if(op==='author')
+                  await social.profile(id);
+
+                if(op==='comments')
+                  await social.comments(id);
+
                 if(['like','save'].includes(op)&&ready()){
                   await rpc('react',{
-                    pid:id,op,
+                    pid:id,
+                    op,
                     enabled:!state.saved.some(
-                      x=>x.id===id&&x.kind===op)
+                      x=>x.id===id&&x.kind===op
+                    )
                   });
+
                   await community(hash,area);
                 }
+
                 if(op==='share'){
                   const r=data.find(x=>x.id===id);
                   const url=location.origin+
                     location.pathname+'#community';
-                  if(navigator.share)
+
+                  if(navigator.share){
                     await navigator.share({
-                      title:r.title,text:r.body,url
+                      title:r.title,
+                      text:r.body,
+                      url
                     });
-                  else{
+                  }else{
                     await navigator.clipboard.writeText(url);
                     message('Community link copied.');
                   }
                 }
-                if(op==='report'&&ready())
+
+                if(op==='report'&&ready()){
                   form('Report content',
                     field('reason','Reason','textarea'),
                     async d=>{
                       await rpc('report',{
-                        post_id:id,details:d.reason
+                        post_id:id,
+                        details:d.reason
                       });
                       modal('<h2>Report received</h2>');
-                    },'Send report');
+                    },'Send report'
+                  );
+                }
+
                 if(cmd==='next'||cmd==='prev'){
                   feedPage=Math.max(0,feedPage+
                     (cmd==='next'?1:-1));
+
                   await community(hash,area);
                 }
-              }catch(err){message(err)}
+
+              }catch(err){
+                alert(String(err.message||err));
+              }
             };
           }
           """
 
-          s=s[:start]+original+replacement+s[end:]
-          s=s.replace("Submit for review","Publish Post")
-          s=s.replace(
-              "modal('<h2>Submitted for moderation</h2>')",
-              "shut();go('community')"
+          url=os.environ["SUPABASE_URL"].rstrip("/")
+          key=os.environ["SUPABASE_PUBLISHABLE_KEY"]
+
+          assert url.startswith("https://")
+          assert key
+
+          replacement=replacement.replace(
+              "__VX_URL__",json.dumps(url)
+          ).replace(
+              "__VX_KEY__",json.dumps(key)
           )
+
+          s=s[:start]+original+replacement+s[end:]
           p.write_text(s)
 
-          css = Path("website/dist/social-feed.css")
+          css=Path("website/dist/social-feed.css")
+
           css.write_text("""
-          .vx-feed {
-            max-width:680px;
+          .vx-feed{
+            max-width:760px;
             margin:0 auto;
           }
-          .vx-tabs {
+
+          .vx-tabs{
             display:flex;
             justify-content:space-around;
             border-bottom:1px solid #77889944;
             margin-bottom:18px;
           }
-          .vx-tabs button {
+
+          .vx-tabs button{
             background:transparent;
             color:inherit;
             border:0;
@@ -278,29 +635,35 @@ jobs:
             font-weight:600;
             cursor:pointer;
           }
-          .vx-tabs .vx-selected {
+
+          .vx-tabs .vx-selected{
             border-bottom:3px solid #ba9a60;
           }
-          .vx-compose,.vx-post {
+
+          .vx-compose,.vx-post{
             border:1px solid #77889944;
             border-radius:16px;
             padding:18px;
             margin-bottom:14px;
           }
-          .vx-author {
+
+          .vx-author{
             display:flex;
             align-items:center;
             gap:12px;
           }
-          .vx-author small {
+
+          .vx-author small{
             display:block;
             opacity:.65;
             font-size:12px;
           }
-          .vx-author .btn {
+
+          .vx-author .btn{
             margin-left:auto;
           }
-          .vx-avatar {
+
+          .vx-avatar{
             width:44px;
             height:44px;
             flex-shrink:0;
@@ -311,178 +674,51 @@ jobs:
             place-items:center;
             font-weight:700;
           }
-          .vx-story {
+
+          .vx-story{
             white-space:pre-wrap;
             overflow-wrap:anywhere;
             line-height:1.65;
           }
-          .vx-actions {
+
+          .vx-actions{
             display:flex;
             flex-wrap:wrap;
             gap:6px;
             border-top:1px solid #77889933;
             padding-top:12px;
           }
-          .vx-actions .btn {
+
+          .vx-actions .btn{
             border:0;
             background:transparent;
             color:inherit;
             font-size:13px;
             padding:8px;
           }
-          .vx-post h3 {
+
+          .vx-post h3{
             margin:16px 0 6px;
           }
-          """)
 
-          h=Path("website/dist/index.html")
-          t=h.read_text()
-          t=t.replace("</head>",
-              '<link rel="stylesheet" href="social-feed.css"></head>')
-          import re
-          t=re.sub(r'members\.js(?:\?[^"]*)?"',
-                   'members.js?v=community4"',t)
-          h.write_text(t)
-          PY
-          node --check website/dist/members.js
-      - name: Enable community photos
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("website/dist/members.js")
-          s = p.read_text()
-
-          extra = r"""
-          async function compressPhoto(file){
-            const url=URL.createObjectURL(file);
-            try{
-              const img=new Image();
-              img.src=url;
-              await img.decode();
-              const canvas=document.createElement('canvas');
-              const scale=Math.min(1,1600/Math.max(img.width,img.height));
-              canvas.width=Math.max(1,Math.round(img.width*scale));
-              canvas.height=Math.max(1,Math.round(img.height*scale));
-              const ctx=canvas.getContext('2d');
-              ctx.fillStyle='#ffffff';
-              ctx.fillRect(0,0,canvas.width,canvas.height);
-              ctx.drawImage(img,0,0,canvas.width,canvas.height);
-              for(let q=.85;q>=.15;q-=.1){
-                const blob=await new Promise(resolve=>
-                  canvas.toBlob(resolve,'image/jpeg',q));
-                if(blob&&blob.size<=512000)return blob;
-              }
-              throw Error('Photo too large after compression.');
-            }finally{URL.revokeObjectURL(url)}
-          }
-
-          async function publishPhotos(){
-            if(!ready())return;
-            form('Share your voyage',
-              field('title','Title','text','',true)+
-              field('story','Caption','textarea','',true)+
-              '<label>Travel photos (maximum 4)'+
-              '<input type="file" name="photos" multiple accept="image/jpeg,image/png,image/webp"></label>'+
-              '<label><input type="checkbox" name="rights" required> I own these photos and agree to publish them publicly.</label>',
-              async(d,el)=>{
-                const files=[...el.querySelector('[name="photos"]').files];
-                if(files.length<1||files.length>4)
-                  throw Error('Select between 1 and 4 photos.');
-                if(d.story.trim().length<10)
-                  throw Error('Caption must contain at least 10 characters.');
-                const user=await api('/auth/v1/user');
-                const paths=[];
-                try{
-                  for(const file of files){
-                    const blob=await compressPhoto(file);
-                    const path=user.id+'/'+crypto.randomUUID()+'.jpg';
-                    const r=await fetch(
-                      config.url+'/storage/v1/object/voyage-photos/'+path,{
-                      method:'POST',
-                      headers:{
-                        apikey:config.key,
-                        Authorization:'Bearer '+token.access_token,
-                        'Content-Type':'image/jpeg'
-                      },
-                      body:blob
-                    });
-                    if(!r.ok)throw Error('Photo upload failed.');
-                    paths.push(path);
-                  }
-                  await rpc('publish_photo',{
-                    heading:d.title,
-                    content:d.story,
-                    photo_paths:paths,
-                    rights:d.rights==='on'
-                  });
-                }catch(err){
-                  if(paths.length){
-                    try{
-                      await api('/storage/v1/object/voyage-photos',
-                        'DELETE',{prefixes:paths});
-                    }catch{}
-                  }
-                  throw err;
-                }
-                modal('<h2>Photos published</h2><p>Close this window and refresh the Community feed.</p>');
-              },'Publish photos');
-          }
-          """
-
-          target="let socialTab='all';"
-          assert target in s
-          s=s.replace(target,extra+"\n"+target,1)
-
-          target="${button('Create post','discussion')}"
-          assert target in s
-          s=s.replace(target,target+
-            "${button('Add photos','photo-post')}",1)
-
-          target="if(cmd==='discussion')publish('discussion');"
-          assert target in s
-          s=s.replace(target,target+
-            "\nif(cmd==='photo-post')await publishPhotos();",1)
-
-          target="let data=await rpc('feed',{page_no:feedPage});"
-          assert target in s
-          s=s.replace(target,target+"""
-            const photoRows=await rpc('feed_photos',{page_no:feedPage});
-            const photoMap=new Map(photoRows.map(x=>[x.id,x.photos]));
-          """,1)
-
-          target='<p class="vx-story">${html(r.body)}</p>'
-          assert target in s
-          s=s.replace(target,target+"""
-            <div class="vx-photos">
-              ${(photoMap.get(r.id)||[]).map(path=>{
-                const src=config.url+
-                  '/storage/v1/object/public/voyage-photos/'+
-                  path.split('/').map(encodeURIComponent).join('/');
-                return `<a href="${html(src)}" target="_blank" rel="noopener">
-                  <img src="${html(src)}" loading="lazy" alt="Travel photograph">
-                </a>`;
-              }).join('')}
-            </div>
-          """,1)
-
-          p.write_text(s)
-
-          css=Path("website/dist/social-feed.css")
-          with css.open("a") as f:
-              f.write("""
-          .vx-feed{max-width:760px}
           .vx-photos{
             display:flex;
             overflow-x:auto;
             scroll-snap-type:x mandatory;
             gap:8px;
             border-radius:12px;
+            margin-bottom:12px;
           }
-          .vx-photos:empty{display:none}
+
+          .vx-photos:empty{
+            display:none;
+          }
+
           .vx-photos a{
             flex:0 0 100%;
             scroll-snap-align:start;
           }
+
           .vx-photos img{
             width:100%;
             max-height:650px;
@@ -490,19 +726,123 @@ jobs:
             display:block;
             border-radius:12px;
           }
-          .vx-post{
-            padding:16px;
-            margin-bottom:12px;
+
+          .vx-dialog{
+            width:min(520px,90vw);
+            max-height:85dvh;
+            overflow:auto;
+            box-sizing:border-box;
+            padding:24px;
+            border:1px solid #c9bda4;
+            border-radius:20px;
+            background:#faf7ef;
+            color:#183b36;
+            z-index:99999;
+          }
+
+          .vx-dialog::backdrop{
+            background:rgba(0,0,0,.65);
+          }
+
+          .vx-dialog-header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+          }
+
+          .vx-dialog-header button{
+            border:0;
+            background:transparent;
+            color:inherit;
+            font-size:30px;
+            cursor:pointer;
+          }
+
+          .vx-dialog label{
+            display:block;
+            margin:14px 0;
+            font-weight:600;
+          }
+
+          .vx-dialog input:not([type=checkbox]),
+          .vx-dialog textarea{
+            display:block;
+            box-sizing:border-box;
+            width:100%;
+            padding:12px;
+            margin-top:8px;
+            border:1px solid #c9bda4;
+            border-radius:10px;
+            background:white;
+            color:#183b36;
+            font-size:16px;
+          }
+
+          .vx-dialog textarea{
+            min-height:110px;
+            resize:vertical;
+          }
+
+          .vx-preview{
+            display:grid;
+            grid-template-columns:repeat(2,1fr);
+            gap:8px;
+            margin-top:12px;
+          }
+
+          .vx-preview img{
+            width:100%;
+            height:130px;
+            object-fit:cover;
+            border-radius:10px;
+          }
+
+          .vx-rights{
+            font-size:13px;
+            line-height:1.5;
+          }
+
+          .vx-publish{
+            width:100%;
+            padding:14px;
+            background:#183b36;
+            color:white;
+            border:0;
+            border-radius:12px;
+            font-size:16px;
+            font-weight:600;
+            cursor:pointer;
+          }
+
+          .vx-publish:disabled{
+            opacity:.5;
+          }
+
+          #vx-status{
+            font-size:14px;
+            overflow-wrap:anywhere;
           }
           """)
 
           h=Path("website/dist/index.html")
-          h.write_text(h.read_text().replace(
-              "members.js?v=community4",
-              "members.js?v=community6"
-          ))
+          t=h.read_text()
+
+          t=t.replace(
+              "</head>",
+              '<link rel="stylesheet" href="social-feed.css?v=7"></head>'
+          )
+
+          t=re.sub(
+              r'members\.js(?:\?[^"]*)?"',
+              'members.js?v=community7"',
+              t
+          )
+
+          h.write_text(t)
           PY
+
           node --check website/dist/members.js
+
       - name: Connect Supabase
         working-directory: website
         env:
@@ -517,3 +857,4 @@ jobs:
           path: website/dist
 
       - uses: actions/deploy-pages@v4
+
