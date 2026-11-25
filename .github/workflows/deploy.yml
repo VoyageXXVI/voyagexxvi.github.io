@@ -22,6 +22,31 @@ jobs:
       - name: Extract website
         run: unzip -o voyage.zip -d website
 
+      - name: Fix login persistence
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("website/dist/members.js")
+          s = p.read_text()
+          s = s.replace(
+              "function setSession(t){token=t;token.expires_at=t.expires_at||Date.now()/1000+t.expires_in}",
+              "function setSession(t){token=t;token.expires_at=t.expires_at||Date.now()/1000+t.expires_in;try{localStorage.setItem('voyage-session',JSON.stringify(token))}catch{}}"
+          )
+          s = s.replace(
+              "function clear(){token=null;",
+              "function clear(){try{localStorage.removeItem('voyage-session')}catch{}token=null;"
+          )
+          s = s.replace(
+              "if(!configured)return;try{const params=",
+              "if(!configured)return;try{try{const saved=JSON.parse(localStorage.getItem('voyage-session'));if(saved?.refresh_token){token=saved;if(token.expires_at<Date.now()/1000+40)setSession(await api('/auth/v1/token?grant_type=refresh_token','POST',{refresh_token:token.refresh_token}))}}catch{clear()}const params="
+          )
+          s = s.replace(
+              "Your session is held in memory.",
+              "You will remain signed in on this browser until you sign out."
+          )
+          p.write_text(s)
+          PY
+
       - name: Connect Supabase
         working-directory: website
         env:
