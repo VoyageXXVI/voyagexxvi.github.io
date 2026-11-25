@@ -22,30 +22,77 @@ jobs:
       - name: Extract website
         run: unzip -o voyage.zip -d website
 
-      - name: Fix login persistence
+      - name: Repair authentication
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path("website/dist/members.js")
           s = p.read_text()
-          s = s.replace(
+
+          def patch(old, new):
+              global s
+              assert old in s, "Patch target missing: " + old
+              s = s.replace(old, new, 1)
+
+          patch(
               "function setSession(t){token=t;token.expires_at=t.expires_at||Date.now()/1000+t.expires_in}",
-              "function setSession(t){token=t;token.expires_at=t.expires_at||Date.now()/1000+t.expires_in;try{localStorage.setItem('voyage-session',JSON.stringify(token))}catch{}}"
+              """function updateAccountButton(){
+                const b=document.getElementById('sign-in');
+                if(b)b.textContent=token?'My Account':'Sign in';
+              }
+              function setSession(t){
+                token=t;
+                token.expires_at=t.expires_at||Date.now()/1000+t.expires_in;
+                try{localStorage.setItem('v26-session',JSON.stringify(token))}catch{}
+                updateAccountButton();
+              }"""
           )
-          s = s.replace(
+
+          patch(
               "function clear(){token=null;",
-              "function clear(){try{localStorage.removeItem('voyage-session')}catch{}token=null;"
+              """function clear(){
+                try{localStorage.removeItem('v26-session')}catch{}
+                token=null;
+                updateAccountButton();"""
           )
-          s = s.replace(
+
+          patch(
               "if(!configured)return;try{const params=",
-              "if(!configured)return;try{try{const saved=JSON.parse(localStorage.getItem('voyage-session'));if(saved?.refresh_token){token=saved;if(token.expires_at<Date.now()/1000+40)setSession(await api('/auth/v1/token?grant_type=refresh_token','POST',{refresh_token:token.refresh_token}))}}catch{clear()}const params="
+              """if(!configured)return;try{
+                try{
+                  const saved=JSON.parse(localStorage.getItem('v26-session'));
+                  if(saved?.refresh_token){
+                    token=saved;
+                    if(token.expires_at<Date.now()/1000+40){
+                      setSession(await api('/auth/v1/token?grant_type=refresh_token','POST',{refresh_token:token.refresh_token}));
+                    }
+                  }
+                }catch{clear()}
+                const params="""
           )
-          s = s.replace(
+
+          patch(
+              "settings=await rpc('state');if(token&&settings.active)await load();route();",
+              "settings=await rpc('state');if(token&&settings.active)await load();updateAccountButton();route();"
+          )
+
+          patch(
               "Your session is held in memory.",
-              "You will remain signed in on this browser until you sign out."
+              "Your session is remembered on this browser."
           )
+
           p.write_text(s)
+
+          h = Path("website/dist/index.html")
+          h.write_text(h.read_text().replace(
+              'src="members.js"',
+              'src="members.js?v=3"'
+          ))
+
+          print("Authentication patches applied.")
           PY
+          node --check website/dist/members.js
 
       - name: Connect Supabase
         working-directory: website
