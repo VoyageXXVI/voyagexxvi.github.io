@@ -345,6 +345,164 @@ jobs:
           h.write_text(t)
           PY
           node --check website/dist/members.js
+      - name: Enable community photos
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("website/dist/members.js")
+          s = p.read_text()
+
+          extra = r"""
+          async function compressPhoto(file){
+            const url=URL.createObjectURL(file);
+            try{
+              const img=new Image();
+              img.src=url;
+              await img.decode();
+              const canvas=document.createElement('canvas');
+              const scale=Math.min(1,1600/Math.max(img.width,img.height));
+              canvas.width=Math.max(1,Math.round(img.width*scale));
+              canvas.height=Math.max(1,Math.round(img.height*scale));
+              const ctx=canvas.getContext('2d');
+              ctx.fillStyle='#ffffff';
+              ctx.fillRect(0,0,canvas.width,canvas.height);
+              ctx.drawImage(img,0,0,canvas.width,canvas.height);
+              for(let q=.85;q>=.15;q-=.1){
+                const blob=await new Promise(resolve=>
+                  canvas.toBlob(resolve,'image/jpeg',q));
+                if(blob&&blob.size<=512000)return blob;
+              }
+              throw Error('Photo too large after compression.');
+            }finally{URL.revokeObjectURL(url)}
+          }
+
+          async function publishPhotos(){
+            if(!ready())return;
+            form('Share your voyage',
+              field('title','Title','text','',true)+
+              field('story','Caption','textarea','',true)+
+              '<label>Travel photos (maximum 4)'+
+              '<input type="file" name="photos" multiple accept="image/jpeg,image/png,image/webp"></label>'+
+              '<label><input type="checkbox" name="rights" required> I own these photos and agree to publish them publicly.</label>',
+              async(d,el)=>{
+                const files=[...el.querySelector('[name="photos"]').files];
+                if(files.length<1||files.length>4)
+                  throw Error('Select between 1 and 4 photos.');
+                if(d.story.trim().length<10)
+                  throw Error('Caption must contain at least 10 characters.');
+                const user=await api('/auth/v1/user');
+                const paths=[];
+                try{
+                  for(const file of files){
+                    const blob=await compressPhoto(file);
+                    const path=user.id+'/'+crypto.randomUUID()+'.jpg';
+                    const r=await fetch(
+                      config.url+'/storage/v1/object/voyage-photos/'+path,{
+                      method:'POST',
+                      headers:{
+                        apikey:config.key,
+                        Authorization:'Bearer '+token.access_token,
+                        'Content-Type':'image/jpeg'
+                      },
+                      body:blob
+                    });
+                    if(!r.ok)throw Error('Photo upload failed.');
+                    paths.push(path);
+                  }
+                  await rpc('publish_photo',{
+                    heading:d.title,
+                    content:d.story,
+                    photo_paths:paths,
+                    rights:d.rights==='on'
+                  });
+                }catch(err){
+                  if(paths.length){
+                    try{
+                      await api('/storage/v1/object/voyage-photos',
+                        'DELETE',{prefixes:paths});
+                    }catch{}
+                  }
+                  throw err;
+                }
+                modal('<h2>Photos published</h2><p>Close this window and refresh the Community feed.</p>');
+              },'Publish photos');
+          }
+          """
+
+          target="let socialTab='all';"
+          assert target in s
+          s=s.replace(target,extra+"\n"+target,1)
+
+          target="${button('Create post','discussion')}"
+          assert target in s
+          s=s.replace(target,target+
+            "${button('Add photos','photo-post')}",1)
+
+          target="if(cmd==='discussion')publish('discussion');"
+          assert target in s
+          s=s.replace(target,target+
+            "\nif(cmd==='photo-post')publishPhotos();",1)
+
+          target="let data=await rpc('feed',{page_no:feedPage});"
+          assert target in s
+          s=s.replace(target,target+"""
+            const photoRows=await rpc('feed_photos',{page_no:feedPage});
+            const photoMap=new Map(photoRows.map(x=>[x.id,x.photos]));
+          """,1)
+
+          target='<p class="vx-story">${html(r.body)}</p>'
+          assert target in s
+          s=s.replace(target,target+"""
+            <div class="vx-photos">
+              ${(photoMap.get(r.id)||[]).map(path=>{
+                const src=config.url+
+                  '/storage/v1/object/public/voyage-photos/'+
+                  path.split('/').map(encodeURIComponent).join('/');
+                return `<a href="${html(src)}" target="_blank" rel="noopener">
+                  <img src="${html(src)}" loading="lazy" alt="Travel photograph">
+                </a>`;
+              }).join('')}
+            </div>
+          """,1)
+
+          p.write_text(s)
+
+          css=Path("website/dist/social-feed.css")
+          with css.open("a") as f:
+              f.write("""
+          .vx-feed{max-width:760px}
+          .vx-photos{
+            display:flex;
+            overflow-x:auto;
+            scroll-snap-type:x mandatory;
+            gap:8px;
+            border-radius:12px;
+          }
+          .vx-photos:empty{display:none}
+          .vx-photos a{
+            flex:0 0 100%;
+            scroll-snap-align:start;
+          }
+          .vx-photos img{
+            width:100%;
+            max-height:650px;
+            object-fit:contain;
+            display:block;
+            border-radius:12px;
+          }
+          .vx-post{
+            padding:16px;
+            margin-bottom:12px;
+          }
+          """)
+
+          h=Path("website/dist/index.html")
+          h.write_text(h.read_text().replace(
+              "members.js?v=community4",
+              "members.js?v=community5"
+          ))
+          PY
+          node --check website/dist/members.js
       - name: Connect Supabase
         working-directory: website
         env:
