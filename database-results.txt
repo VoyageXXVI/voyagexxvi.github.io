@@ -1,0 +1,19 @@
+PASS Public registration and community start closed
+PASS Unverified email cannot activate
+PASS Age and each agreement required
+PASS Versioned acceptance recorded with timestamp and retry is idempotent
+PASS Private record isolation and staff restrictions
+PASS Material change forces renewed acceptance
+PASS Community gate, rights and rating validation
+PASS Pending reviews private and duplicates blocked
+PASS Moderation and ranking threshold
+PASS Submission and report limits enforced
+PASS Moderators can close reports, remove content and suspend accounts
+PASS Disposable snapshot restores data and owner isolation
+PASS 2,000-record quota isolates capacity by account
+PASS Invited readers see only permitted fields and lose access on revocation
+PASS Opt-in passport exposes only historical country stamps; block removes follow
+PASS Private image gate, format validation, private export and admin pause
+PASS Comments require enabled feature and moderation; ratings aggregate approved reviews
+PASS Account deletion requires confirmation and cascades
+18 integration groups passed
