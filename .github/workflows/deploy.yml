@@ -21,7 +21,7 @@ jobs:
 
       - name: Extract website
         run: |
-          unzip -o "VoyageXXVI-GitHub-Pages(1).zip" -d website
+          unzip -o "voyage.zip" -d website
 
       - uses: actions/configure-pages@v5
 
