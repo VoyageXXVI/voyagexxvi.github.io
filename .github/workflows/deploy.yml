@@ -20,8 +20,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Extract website
-        run: |
-          unzip -o "voyage.zip" -d website
+        run: unzip -o voyage.zip -d website
+
+      - name: Connect Supabase
+        working-directory: website
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+        run: node scripts/configure.mjs
 
       - uses: actions/configure-pages@v5
 
